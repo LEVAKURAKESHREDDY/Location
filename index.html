@@ -108,5 +108,22 @@
       if (downloadBtn.disabled) e.preventDefault();
     });
   </script>
-</body>
+</body><button id="instantBtn">Take Instant Photo</button>
+<input id="instantInput" type="file" accept="image/*" capture="environment" style="display:none" />
+<img id="instantPreview" alt="Preview" style="max-width:320px;display:block;margin-top:12px;border:1px solid #ccc;" />
+
+<script>
+  const instantBtn = document.getElementById('instantBtn');
+  const instantInput = document.getElementById('instantInput');
+  const instantPreview = document.getElementById('instantPreview');
+
+  instantBtn.addEventListener('click', () => instantInput.click());
+
+  instantInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    instantPreview.src = url;
+  });
+</script>
 </html>
